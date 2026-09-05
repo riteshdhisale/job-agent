@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Profile — job_agent{% endblock %}
+{% block content %}
+  <h1>Your Candidate Profile</h1>
+  <p class="gate-note">Read by every agent before it asks you anything, written to whenever you answer
+     a new screening question during Apply — so nothing is asked twice.</p>
+
+  <div class="card">
+    <form method="post">
+      <label for="full_name">Full name</label>
+      <input type="text" name="full_name" id="full_name" value="{{ profile.full_name }}">
+      <label for="email">Email</label>
+      <input type="email" name="email" id="email" value="{{ profile.email }}">
+      <label for="phone">Phone</label>
+      <input type="text" name="phone" id="phone" value="{{ profile.phone }}">
+      <label for="location">Location</label>
+      <input type="text" name="location" id="location" value="{{ profile.location }}">
+      <label for="linkedin_url">LinkedIn URL</label>
+      <input type="text" name="linkedin_url" id="linkedin_url" value="{{ profile.linkedin_url }}">
+      <label for="portfolio_url">Portfolio URL</label>
+      <input type="text" name="portfolio_url" id="portfolio_url" value="{{ profile.portfolio_url }}">
+      <label for="work_authorized">Work authorization (free text, e.g. "Yes, no sponsorship needed")</label>
+      <input type="text" name="work_authorized" id="work_authorized" value="{{ profile.work_authorized }}">
+      <button type="submit">Save</button>
+    </form>
+  </div>
+
+  <h2>Cached screening-question answers</h2>
+  <div class="card">
+    {% if profile.answers %}
+      <table>
+        <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+        <tbody>
+          {% for q, a in profile.answers.items() %}
+            <tr><td>{{ q }}</td><td>{{ a }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">None yet — these fill in automatically the first time Apply asks you something new.</p>
+    {% endif %}
+  </div>
+{% endblock %}

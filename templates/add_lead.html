@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Add Lead — job_agent{% endblock %}
+{% block content %}
+  <h1>Add a pasted lead</h1>
+  <p class="gate-note">Paste a LinkedIn post, a Naukri/Instahyre/Indeed job-alert email, or an agency
+     recruiter's message. An LLM tool extracts the role, how to apply, and a contact if one's identifiable.</p>
+  <div class="card">
+    <form method="post">
+      <label for="source">Source label</label>
+      <select name="source" id="source">
+        <option value="linkedin_post">LinkedIn post</option>
+        <option value="email_alert_naukri">Naukri email alert</option>
+        <option value="email_alert_indeed">Indeed email alert</option>
+        <option value="agency_email">Agency email</option>
+        <option value="manual">Other</option>
+      </select>
+      <label for="text">Pasted text</label>
+      <textarea name="text" id="text" placeholder="Paste the post / email content here..."></textarea>
+      <button type="submit">Extract and add</button>
+    </form>
+  </div>
+{% endblock %}

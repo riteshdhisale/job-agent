@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Add Browsed Page — job_agent{% endblock %}
+{% block content %}
+  <h1>Add a live-browsed page</h1>
+  <p class="gate-note">After browsing a page together with Claude (e.g. a LinkedIn Jobs search results
+     page) in a live chat session, paste what was read here — it's extracted and scored the same as
+     any other source. This is the human-paced alternative to an unattended scraper.</p>
+  <div class="card">
+    <form method="post">
+      <label for="source_url">Where this came from (optional)</label>
+      <input type="text" name="source_url" id="source_url" placeholder="e.g. linkedin.com/jobs/search?keywords=product+manager">
+      <label for="text">Page text</label>
+      <textarea name="text" id="text" placeholder="Paste the search results text here..."></textarea>
+      <button type="submit">Extract and add</button>
+    </form>
+  </div>
+{% endblock %}

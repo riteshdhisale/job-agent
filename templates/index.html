@@ -1,0 +1,450 @@
+{% extends "base.html" %}
+{% block title %}job_agent{% endblock %}
+{% block content %}
+  <div class="stats-bar" id="stats-bar"></div>
+
+  <div class="toolbar">
+    <div class="filters" id="filters"></div>
+    <button type="button" class="btn-primary" id="discover-toggle">+ Run discovery</button>
+  </div>
+
+  <div class="panel discover-panel" id="discover-panel" hidden>
+    <h2>Discover</h2>
+    <p class="gate-note">Scans your career sites (data/career_sites.json) + Adzuna + RemoteOK + ~86
+       Greenhouse/Lever company boards. Instahyre is opt-in and rate-limited (~once/3h). Naukri and
+       LinkedIn aren't automated here — use Add Lead / Add Browsed Page for those.</p>
+
+    <div id="discover-form">
+      <label for="d-query">Job titles to search (comma-separated; used for Adzuna / RemoteOK / Instahyre)</label>
+      <input type="text" id="d-query" value="product manager, product owner, business analyst">
+      <div class="field-row">
+        <div>
+          <label for="d-country">Country code (Adzuna)</label>
+          <input type="text" id="d-country" value="in">
+        </div>
+        <div>
+          <label for="d-max-age">Only jobs posted within the last N hours</label>
+          <input type="number" id="d-max-age" placeholder="e.g. 48 — leave blank for no limit">
+        </div>
+        <div>
+          <label for="d-min-salary">Minimum salary, local currency</label>
+          <input type="number" id="d-min-salary" placeholder="e.g. 3000000 for ₹30L">
+        </div>
+      </div>
+      <label for="d-title-keywords">Title must contain one of these (comma-separated) — the actual fix for
+        off-topic roles, since Greenhouse/Lever hand back a company's whole board with no search of its own</label>
+      <input type="text" id="d-title-keywords"
+             value="Product Manager, Technical Product Manager, TPM, Technical Product Owner, Product Owner, Business Analyst, Platform PM, API PM">
+      <div class="field-row">
+        <div>
+          <label for="d-exclude-keywords">Skip titles containing (comma-separated)</label>
+          <input type="text" id="d-exclude-keywords" value="Intern, Senior Director, VP, Associate PM">
+        </div>
+        <div>
+          <label for="d-locations">Only these locations (comma-separated; blank location always kept)</label>
+          <input type="text" id="d-locations" value="Bengaluru, Bangalore, Pune, Hyderabad, Remote - India, India">
+        </div>
+      </div>
+      <label class="checkbox-label"><input type="checkbox" id="d-instahyre"> Also scrape Instahyre (rate-limited)</label>
+      <div class="actions">
+        <button type="button" class="btn-primary" id="discover-run">Run discovery</button>
+        <button type="button" class="btn-secondary" id="discover-cancel">Close</button>
+      </div>
+    </div>
+
+    <div id="discover-progress" hidden>
+      <div class="progress-track"><div class="progress-fill" id="progress-fill" style="width: 0%"></div></div>
+      <p id="progress-text">Starting…</p>
+      <p id="progress-jobs" class="meta-line"></p>
+      <div id="progress-error" class="flash flash-error" hidden>
+        <div id="progress-error-text"></div>
+        <button type="button" class="btn-secondary" id="discover-retry" style="margin-top:10px">Try again</button>
+      </div>
+      <div id="progress-done" hidden>
+        <p class="flash flash-success">Done — the list below is up to date.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="board">
+    <div class="job-list" id="job-list">
+      <p class="empty">Loading…</p>
+    </div>
+    <div class="job-detail" id="job-detail">
+      <div class="empty-state">
+        <p>Select a job on the left to see details, or run discovery to find some.</p>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const STATUSES = {{ STATUSES | tojson }};
+const MIN_SCORE = {{ min_score }};
+let currentStatus = null;
+let selectedJobId = {{ (open_job | int) if open_job else 'null' }};
+let jobsById = {};
+
+function api(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
+  return fetch(url, opts).then(r => r.json());
+}
+
+// --- job list + stats -------------------------------------------------------
+
+function loadJobs() {
+  const qs = currentStatus ? ("?status=" + encodeURIComponent(currentStatus)) : "";
+  return api("/api/jobs" + qs).then(data => {
+    jobsById = {};
+    data.jobs.forEach(j => jobsById[j.id] = j);
+    renderStats(data);
+    renderFilters();
+    renderJobList(data.jobs);
+
+    if (selectedJobId && jobsById[selectedJobId]) {
+      renderDetail(jobsById[selectedJobId]);
+    } else if (data.jobs.length && !document.querySelector('.job-row.selected')) {
+      selectJob(data.jobs[0].id);
+    } else if (!data.jobs.length) {
+      selectedJobId = null;
+      document.getElementById('job-detail').innerHTML =
+        '<div class="empty-state"><p>No jobs in this view yet.</p></div>';
+    }
+  });
+}
+
+function renderStats(data) {
+  const notYetApplied = data.total - data.applied_or_further - (data.counts.ready_to_submit || 0);
+  document.getElementById('stats-bar').innerHTML = `
+    <div class="stat"><span class="stat-num">${data.total}</span><span class="stat-label">total found</span></div>
+    <div class="stat"><span class="stat-num">${data.counts.ready_to_submit || 0}</span><span class="stat-label">ready to submit</span></div>
+    <div class="stat stat-good"><span class="stat-num">${data.applied_or_further}</span><span class="stat-label">applied or further</span></div>
+    <div class="stat"><span class="stat-num">${notYetApplied}</span><span class="stat-label">not yet applied</span></div>`;
+}
+
+function renderFilters() {
+  const all = `<button type="button" class="filter-pill ${!currentStatus ? 'active' : ''}" data-status="">all</button>`;
+  const rest = STATUSES.map(s =>
+    `<button type="button" class="filter-pill ${currentStatus === s ? 'active' : ''}" data-status="${s}">${prettyStatus(s)}</button>`
+  ).join("");
+  document.getElementById('filters').innerHTML = all + rest;
+  document.querySelectorAll('.filter-pill').forEach(btn => {
+    btn.addEventListener('click', () => { currentStatus = btn.dataset.status || null; loadJobs(); });
+  });
+}
+
+function renderJobList(jobs) {
+  const el = document.getElementById('job-list');
+  if (!jobs.length) {
+    el.innerHTML = '<p class="empty">No jobs yet. Run discovery above, or use Add Lead / Add Browsed Page.</p>';
+    return;
+  }
+  el.innerHTML = jobs.map(j => `
+    <div class="job-row ${j.id === selectedJobId ? 'selected' : ''}" data-id="${j.id}">
+      <div class="job-row-score">${j.score}</div>
+      <div class="job-row-main">
+        <div class="job-row-title">${escapeHtml(j.title)}</div>
+        <div class="job-row-meta">
+          <span class="badge badge-${j.status}">${prettyStatus(j.status)}</span>
+          <span>${j.salary_display === 'not disclosed' ? 'salary n/a' : j.salary_display}</span>
+          <span>${j.posted_display === 'posting date unknown' ? 'date unknown' : j.posted_display}</span>
+        </div>
+      </div>
+    </div>`).join("");
+  document.querySelectorAll('.job-row').forEach(row => {
+    row.addEventListener('click', () => selectJob(parseInt(row.dataset.id, 10)));
+  });
+}
+
+function selectJob(id) {
+  selectedJobId = id;
+  document.querySelectorAll('.job-row').forEach(r => r.classList.toggle('selected', parseInt(r.dataset.id, 10) === id));
+  if (jobsById[id]) {
+    renderDetail(jobsById[id]);
+  } else {
+    api(`/api/jobs/${id}`).then(res => { if (res.ok) { jobsById[id] = res.job; renderDetail(res.job); } });
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
+
+function prettyStatus(s) {
+  return s.replace(/_/g, ' ');
+}
+
+// --- job detail panel --------------------------------------------------------
+
+function renderDetail(job) {
+  const el = document.getElementById('job-detail');
+  const targetLink = job.target_url
+    ? (job.application_method === 'email' && job.target_url.includes('@') && !job.target_url.startsWith('http')
+        ? `<a href="mailto:${escapeHtml(job.target_url)}">✉ ${escapeHtml(job.target_url)}</a>`
+        : `<a href="${escapeHtml(job.target_url)}" target="_blank" rel="noopener noreferrer">↗ View / apply to this posting</a>`)
+    : '';
+
+  el.innerHTML = `
+    <div class="job-header">
+      <h1>${escapeHtml(job.title)}</h1>
+      <div class="score-big">${job.score}</div>
+    </div>
+    <div class="meta">
+      <span class="badge badge-${job.status}">${prettyStatus(job.status)}</span>
+      <span>${escapeHtml(job.location || '')}</span>
+      <span>source: ${escapeHtml(job.source_type)}</span>
+      <span>${escapeHtml(job.salary_display)}</span>
+      <span>${escapeHtml(job.posted_display)}</span>
+    </div>
+    ${targetLink ? `<p>${targetLink}</p>` : ''}
+    <p><strong>Why this matched:</strong> ${escapeHtml(job.rationale)}</p>
+    <p><strong>Matched skills:</strong> ${escapeHtml((job.matched_skills || []).join(', ') || 'none')}</p>
+    <p><strong>Missing skills:</strong> ${escapeHtml((job.missing_skills || []).join(', ') || 'none')}</p>
+
+    <div class="status-row">
+      <label for="status-select">Status</label>
+      <select id="status-select">
+        ${STATUSES.map(s => `<option value="${s}" ${s === job.status ? 'selected' : ''}>${prettyStatus(s)}</option>`).join("")}
+      </select>
+      <button type="button" class="btn-secondary" id="delete-btn">Delete this job</button>
+    </div>
+
+    <h2>1. Tailor resume ${job.score < MIN_SCORE ? `<span class="gate-note-inline">(score below ${MIN_SCORE} — gated by default)</span>` : ''}</h2>
+    <div class="card" id="tailor-card">
+      ${job.tailored_resume ? `<pre>${escapeHtml(job.tailored_resume)}</pre>` : ''}
+      ${job.score < MIN_SCORE ? `<label class="checkbox-label"><input type="checkbox" id="tailor-force"> Override the ${MIN_SCORE}-score gate anyway</label>` : ''}
+      <button type="button" class="btn-primary" id="tailor-btn">${job.tailored_resume ? 'Re-tailor' : 'Tailor resume'}</button>
+    </div>
+
+    <h2>2. Find contacts &amp; draft outreach</h2>
+    <div class="card" id="outreach-card">
+      ${job.outreach_contacts ? `<pre>${escapeHtml(JSON.stringify(job.outreach_contacts, null, 2))}</pre>` :
+        `<div class="field-row">
+          <input type="text" id="contacts-company" placeholder="Company name (needed to search Apollo)">
+          <button type="button" class="btn-secondary" id="contacts-btn">Find contacts</button>
+        </div>`}
+      ${job.outreach_message ? `<pre>${escapeHtml(job.outreach_message)}</pre><p class="gate-note">This is a DRAFT. Review it, then send it yourself.</p>` : ''}
+      <div class="field-row">
+        <input type="text" id="outreach-name" placeholder="Recipient name (optional)">
+        <input type="text" id="outreach-title" placeholder="Recipient title">
+        <input type="text" id="outreach-company" placeholder="Company name">
+      </div>
+      <button type="button" class="btn-secondary" id="outreach-btn">Draft outreach message</button>
+    </div>
+
+    <h2>3. Apply</h2>
+    <div class="card" id="apply-card">
+      ${job.application_notes ? `<pre>${escapeHtml(job.application_notes)}</pre>` : ''}
+      <div id="apply-pending"></div>
+      <div class="field-row">
+        <input type="text" id="apply-company" placeholder="Company name (used for email drafts)">
+        <button type="button" class="btn-secondary" id="apply-btn">Run apply step</button>
+      </div>
+      <p class="gate-note">Fills the form or drafts the email — never clicks submit / never sends.</p>
+      <button type="button" class="btn-secondary" id="mark-applied-btn">I actually submitted this — mark applied</button>
+    </div>
+
+    <h2>4. Interview prep</h2>
+    <div class="card" id="prep-card">
+      ${job.interview_notes ? `<pre>${escapeHtml(job.interview_notes)}</pre>` : ''}
+      <button type="button" class="btn-secondary" id="prep-btn">Generate interview prep</button>
+    </div>
+  `;
+
+  wireDetailActions(job.id);
+}
+
+function withBusy(btn, label, fn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = label;
+  return fn().finally(() => { btn.disabled = false; btn.textContent = original; });
+}
+
+function refreshAfterAction(jobId) {
+  // Cheap local DB reads (no LLM/network calls) -- keeps the list's badge/salary/
+  // status in sync with whatever the detail panel just changed.
+  return loadJobs();
+}
+
+function wireDetailActions(jobId) {
+  document.getElementById('status-select').addEventListener('change', e => {
+    api(`/api/jobs/${jobId}/status`, {method: 'POST', body: JSON.stringify({status: e.target.value})})
+      .then(() => refreshAfterAction(jobId));
+  });
+
+  document.getElementById('delete-btn').addEventListener('click', () => {
+    if (!confirm(`Delete job #${jobId} (${jobsById[jobId].title})? This cannot be undone.`)) return;
+    api(`/api/jobs/${jobId}/delete`, {method: 'POST'}).then(() => { selectedJobId = null; loadJobs(); });
+  });
+
+  document.getElementById('tailor-btn').addEventListener('click', function () {
+    const force = document.getElementById('tailor-force');
+    withBusy(this, 'Tailoring…', () =>
+      api(`/api/jobs/${jobId}/tailor`, {method: 'POST', body: JSON.stringify({force: force ? force.checked : false})})
+        .then(res => { if (!res.ok) alert(res.error); return refreshAfterAction(jobId); }));
+  });
+
+  const contactsBtn = document.getElementById('contacts-btn');
+  if (contactsBtn) {
+    contactsBtn.addEventListener('click', function () {
+      const company = document.getElementById('contacts-company').value.trim();
+      withBusy(this, 'Searching…', () =>
+        api(`/api/jobs/${jobId}/contacts`, {method: 'POST', body: JSON.stringify({company})})
+          .then(res => { if (!res.ok) alert(res.error); else if (res.info) alert(res.info); return refreshAfterAction(jobId); }));
+    });
+  }
+
+  document.getElementById('outreach-btn').addEventListener('click', function () {
+    const name = document.getElementById('outreach-name').value.trim();
+    const title = document.getElementById('outreach-title').value.trim();
+    const company = document.getElementById('outreach-company').value.trim();
+    withBusy(this, 'Drafting…', () =>
+      api(`/api/jobs/${jobId}/outreach`, {method: 'POST', body: JSON.stringify({name, title, company})})
+        .then(res => { if (!res.ok) alert(res.error); return refreshAfterAction(jobId); }));
+  });
+
+  document.getElementById('apply-btn').addEventListener('click', function () {
+    const company = document.getElementById('apply-company').value.trim();
+    withBusy(this, 'Applying…', () =>
+      api(`/api/jobs/${jobId}/apply`, {method: 'POST', body: JSON.stringify({company})})
+        .then(res => {
+          if (!res.ok) { alert(res.error); return; }
+          if (res.kind === 'needs_review') { renderApplyPending(jobId, res.pending); return; }
+          if (res.info) alert(res.info);
+          return refreshAfterAction(jobId);
+        }));
+  });
+
+  document.getElementById('mark-applied-btn').addEventListener('click', function () {
+    withBusy(this, 'Saving…', () => api(`/api/jobs/${jobId}/mark-applied`, {method: 'POST'}).then(() => refreshAfterAction(jobId)));
+  });
+
+  document.getElementById('prep-btn').addEventListener('click', function () {
+    withBusy(this, 'Preparing…', () =>
+      api(`/api/jobs/${jobId}/prep`, {method: 'POST'}).then(() => refreshAfterAction(jobId)));
+  });
+}
+
+function renderApplyPending(jobId, pending) {
+  const el = document.getElementById('apply-pending');
+  el.innerHTML = `
+    <div class="flash flash-info">
+      <p>A few fields couldn't be confidently matched to your profile. Answer them once — they're saved so
+         you're never asked again. Already filled from your profile: ${escapeHtml(pending.filled.join(', ') || 'nothing')}.</p>
+      ${pending.labels.map((label, i) => `
+        <div class="field-group">
+          <label for="pending-field-${i}">${escapeHtml(label)}</label>
+          <input type="text" id="pending-field-${i}">
+        </div>`).join("")}
+      <button type="button" class="btn-primary" id="pending-save-btn">Save answers</button>
+      <p class="gate-note">Screenshot saved to: ${escapeHtml(pending.screenshot)}</p>
+    </div>`;
+  document.getElementById('pending-save-btn').addEventListener('click', function () {
+    const answers = pending.labels.map((_, i) => document.getElementById(`pending-field-${i}`).value);
+    withBusy(this, 'Saving…', () =>
+      api(`/api/jobs/${jobId}/apply/resolve`, {method: 'POST', body: JSON.stringify({answers})})
+        .then(() => refreshAfterAction(jobId)));
+  });
+}
+
+// --- discover panel -----------------------------------------------------------
+
+const discoverPanel = document.getElementById('discover-panel');
+document.getElementById('discover-toggle').addEventListener('click', () => {
+  discoverPanel.hidden = !discoverPanel.hidden;
+});
+document.getElementById('discover-cancel').addEventListener('click', () => { discoverPanel.hidden = true; });
+
+document.getElementById('discover-run').addEventListener('click', runDiscovery);
+document.getElementById('discover-retry').addEventListener('click', runDiscovery);
+
+function runDiscovery() {
+  document.getElementById('discover-form').hidden = true;
+  const progressEl = document.getElementById('discover-progress');
+  progressEl.hidden = false;
+  document.getElementById('progress-error').hidden = true;
+  document.getElementById('progress-done').hidden = true;
+  document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('progress-text').textContent = 'Starting…';
+  document.getElementById('progress-jobs').textContent = '';
+
+  const body = {
+    query: document.getElementById('d-query').value,
+    country: document.getElementById('d-country').value,
+    max_age_hours: document.getElementById('d-max-age').value,
+    min_salary: document.getElementById('d-min-salary').value,
+    title_keywords: document.getElementById('d-title-keywords').value,
+    exclude_title_keywords: document.getElementById('d-exclude-keywords').value,
+    locations: document.getElementById('d-locations').value,
+    include_instahyre: document.getElementById('d-instahyre').checked,
+  };
+
+  api('/discover', {method: 'POST', body: JSON.stringify(body)}).then(res => {
+    if (!res.ok) {
+      document.getElementById('discover-form').hidden = false;
+      progressEl.hidden = true;
+      alert(res.info || 'Could not start discovery.');
+      return;
+    }
+    pollDiscoverStatus();
+  });
+}
+
+function pollDiscoverStatus() {
+  api('/discover/status').then(state => {
+    const fill = document.getElementById('progress-fill');
+    const text = document.getElementById('progress-text');
+    const jobsEl = document.getElementById('progress-jobs');
+    const errEl = document.getElementById('progress-error');
+    const doneEl = document.getElementById('progress-done');
+
+    const pct = state.total > 0 ? Math.round(100 * state.done / state.total) : 0;
+    fill.style.width = pct + '%';
+
+    if (state.error) {
+      text.textContent = 'Discovery hit an error.';
+      document.getElementById('progress-error-text').textContent = state.error;
+      errEl.hidden = false;
+      document.getElementById('discover-form').hidden = false;
+      loadJobs();
+      return; // stop polling -- whatever it found before failing is already saved
+    }
+
+    if (state.finished) {
+      const s = state.summary || {};
+      text.textContent = 'Done.';
+      jobsEl.textContent = `Found ${s.jobs_found || 0} job(s) across ${s.sites_attempted || 0} career site(s) + API sources.`;
+      if (s.sites_failed && s.sites_failed.length) jobsEl.textContent += ' Skipped: ' + s.sites_failed.join('; ');
+      fill.style.width = '100%';
+      doneEl.hidden = false;
+      document.getElementById('discover-form').hidden = false;
+      loadJobs();
+      return; // stop polling
+    }
+
+    text.textContent = `Checking source ${state.done} of ${state.total || '?'}: ${state.label || ''}`;
+    jobsEl.textContent = `${state.jobs_found} job(s) found so far.`;
+    setTimeout(pollDiscoverStatus, 1000);
+  }).catch(() => setTimeout(pollDiscoverStatus, 2000));
+}
+
+// If a discovery run is already in flight from before this page load (e.g. the
+// tab was closed and reopened), pick the progress panel back up instead of
+// showing a blank "Run discovery" button as if nothing were happening.
+api('/discover/status').then(state => {
+  if (state.running) {
+    discoverPanel.hidden = false;
+    document.getElementById('discover-form').hidden = true;
+    document.getElementById('discover-progress').hidden = false;
+    pollDiscoverStatus();
+  }
+});
+
+loadJobs();
+</script>
+{% endblock %}
