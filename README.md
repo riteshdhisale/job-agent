@@ -507,13 +507,24 @@ plain SQLite counters, sized for "a handful of people click a portfolio link," n
 withstanding a determined attacker with many real inboxes and a rotating IP. That's a
 disclosed, deliberate trade-off for a personal-project demo, not an oversight.
 
+**Sending the magic-link email: an HTTP API, not SMTP.** Most hosts — Render included —
+block outbound raw SMTP connections (ports 465/587) to stop their infrastructure being
+used for spam, so a Gmail-App-Password-over-SMTP approach fails from a real deployment
+with `[Errno 101] Network is unreachable`, even though it works fine locally where
+nothing's blocking the port. `demo_gate.py` instead sends via
+[Resend](https://resend.com)'s HTTP email API, which goes over the same port 443 as any
+normal web request and isn't affected by the SMTP block.
+
 **Deploying it (Render, or anything similar that reads a `Procfile`):**
 
 1. Push this repo to your own GitHub account (see the main project README/case study
    for why this one's a fork-friendly, sanitized copy).
-2. Create a Gmail **App Password** (not your account password — Google blocks that for
-   SMTP entirely): Google Account → Security → turn on 2-Step Verification → App
-   passwords → create one for "Mail". This is what sends the magic-link emails.
+2. Create a free Resend account and API key at
+   [resend.com/api-keys](https://resend.com/api-keys) — no credit card, no domain
+   verification needed to start (100 emails/day on the free tier, using the shared
+   `onboarding@resend.dev` sender address). If you'd rather emails arrive from a domain
+   you own, verify it in Resend's dashboard and set `RESEND_FROM_EMAIL` accordingly —
+   optional, not required to get the demo working.
 3. Create a Render (or equivalent) web service pointed at your repo. It picks up the
    `Procfile` (`gunicorn app:app --workers 1 --worker-class gthread --threads 8`) —
    deliberately **one worker**, since discovery progress lives in an in-process dict
@@ -523,18 +534,22 @@ disclosed, deliberate trade-off for a personal-project demo, not an oversight.
    - `DEMO_MODE=1`
    - `FLASK_SECRET_KEY` — generate one with
      `python -c "import secrets; print(secrets.token_hex(32))"`
-   - `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` — from step 2
+   - `RESEND_API_KEY` — from step 2
+   - `DEMO_REPLY_TO_EMAIL` — optional; a real inbox of yours so replies to the magic-link
+     email land somewhere (the visible "From" stays `onboarding@resend.dev` unless you've
+     verified your own domain with Resend)
    - `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY`, matching whatever `DEMO_ENGINE` you use)
      — consider a **separate** key from your personal daily-driver key, so demo traffic
      and your own usage aren't drawing on the same quota
    - `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` — optional; without these, Adzuna is silently
      skipped in the demo the same way it is locally
-   - Optionally override any of `DEMO_ENGINE`, `DEMO_MAX_RUNS_PER_EMAIL`,
-     `DEMO_ADZUNA_MAX_PAGES`, `DEMO_MAX_EXTRA_ACTIONS_PER_EMAIL`,
+   - Optionally override any of `DEMO_ENGINE`, `RESEND_FROM_EMAIL`,
+     `DEMO_MAX_RUNS_PER_EMAIL`, `DEMO_ADZUNA_MAX_PAGES`, `DEMO_MAX_EXTRA_ACTIONS_PER_EMAIL`,
      `DEMO_LINK_EXPIRY_MINUTES`, `DEMO_MAX_REQUESTS_PER_EMAIL_PER_DAY`,
      `DEMO_MAX_REQUESTS_PER_IP_PER_HOUR` — all documented at the top of `demo_gate.py`.
 5. Deploy. Visit the assigned URL's `/demo` and request access to yourself first, before
-   sharing the link anywhere, to confirm the email actually arrives.
+   sharing the link anywhere, to confirm the email actually arrives (check spam too —
+   a fresh sending address has no reputation yet).
 
 ## License
 

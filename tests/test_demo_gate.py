@@ -5,6 +5,7 @@ per-email discover-run cap. No real SMTP anywhere: every test passes a fake
 import time
 
 import pytest
+import requests
 
 import demo_gate
 
@@ -132,7 +133,67 @@ def test_extra_action_cap(db_path, monkeypatch):
 
 
 def test_send_magic_link_email_requires_credentials(monkeypatch):
-    monkeypatch.setattr(demo_gate, "GMAIL_ADDRESS", "")
-    monkeypatch.setattr(demo_gate, "GMAIL_APP_PASSWORD", "")
+    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "")
     with pytest.raises(RuntimeError):
+        demo_gate.send_magic_link_email("someone@example.com", "http://x/demo/verify/tok")
+
+
+def test_send_magic_link_email_calls_the_resend_api(monkeypatch):
+    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "RESEND_FROM_EMAIL", "job_agent Demo <onboarding@resend.dev>")
+    monkeypatch.setattr(demo_gate, "REPLY_TO_EMAIL", "ritesh@example.com")
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(demo_gate.requests, "post", fake_post)
+
+    demo_gate.send_magic_link_email("someone@example.com", "http://x/demo/verify/tok")
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"] == "https://api.resend.com/emails"
+    assert call["headers"]["Authorization"] == "Bearer test-key"
+    assert call["json"]["to"] == ["someone@example.com"]
+    assert call["json"]["from"] == "job_agent Demo <onboarding@resend.dev>"
+    assert call["json"]["reply_to"] == "ritesh@example.com"
+    assert "http://x/demo/verify/tok" in call["json"]["text"]
+
+
+def test_send_magic_link_email_omits_reply_to_when_unset(monkeypatch):
+    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "REPLY_TO_EMAIL", "")
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        return FakeResponse()
+
+    monkeypatch.setattr(demo_gate.requests, "post", fake_post)
+    demo_gate.send_magic_link_email("someone@example.com", "http://x/demo/verify/tok")
+    assert "reply_to" not in calls[0]
+
+
+def test_a_failed_resend_call_propagates_as_an_exception(monkeypatch):
+    # request_access is what's responsible for turning this into a clean user-facing
+    # message (see test_a_send_failure_is_reported_cleanly_not_raised above) -- this
+    # test just confirms send_magic_link_email itself doesn't swallow a bad response.
+    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "test-key")
+
+    class FailingResponse:
+        def raise_for_status(self):
+            raise requests.HTTPError("422 Client Error: Unprocessable Entity")
+
+    monkeypatch.setattr(demo_gate.requests, "post", lambda *a, **kw: FailingResponse())
+    with pytest.raises(requests.HTTPError):
         demo_gate.send_magic_link_email("someone@example.com", "http://x/demo/verify/tok")

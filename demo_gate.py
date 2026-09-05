@@ -13,8 +13,9 @@ data/demo_jobs.db, so wiping one never touches the others):
      an email-only limit doesn't stop someone cycling through throwaway
      addresses to spam the mailbox or the Adzuna/Gemini quota), creates a
      single-use token good for DEMO_LINK_EXPIRY_MINUTES, and emails a magic
-     link via Gmail SMTP (an App Password, not the account password --
-     see README's "Deploying the public demo" section for how to get one).
+     link via Resend's HTTP email API (see README's "Deploying the public
+     demo" section for why HTTP-based sending, not raw SMTP -- most hosts,
+     Render included, block outbound SMTP entirely).
   2. verify_token(token) -- marks the token used (so the same link can't be
      replayed) and returns the email it belongs to, or None if it's missing,
      expired, or already used.
@@ -32,14 +33,14 @@ from __future__ import annotations
 
 import os
 import secrets
-import smtplib
 import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass
-from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DEFAULT_DB_PATH = DATA_DIR / "demo_access.db"
@@ -54,8 +55,15 @@ MAX_REQUESTS_PER_IP_PER_HOUR = int(os.environ.get("DEMO_MAX_REQUESTS_PER_IP_PER_
 # had to reach this address" spirit as MAX_RUNS_PER_EMAIL, not a daily reset.
 MAX_EXTRA_ACTIONS_PER_EMAIL = int(os.environ.get("DEMO_MAX_EXTRA_ACTIONS_PER_EMAIL", "10"))
 
-GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+# Sending goes through Resend's HTTP API, not raw SMTP -- see send_magic_link_email's
+# docstring below for why. RESEND_FROM_EMAIL defaults to Resend's shared sandbox
+# address, which works with zero setup (no domain verification) but means the email
+# arrives "from" Resend, not from a personal address; DEMO_REPLY_TO_EMAIL (falling back
+# to GMAIL_ADDRESS if that's the only one set, for anyone who configured this before the
+# SMTP-to-API switch) lets a real inbox still show up as the reply-to.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "job_agent Demo <onboarding@resend.dev>")
+REPLY_TO_EMAIL = os.environ.get("DEMO_REPLY_TO_EMAIL", os.environ.get("GMAIL_ADDRESS", ""))
 
 
 class DemoAccessError(Exception):
@@ -160,14 +168,23 @@ def request_access(email: str, ip: Optional[str], base_url: str,
 
 
 def send_magic_link_email(email: str, link: str) -> None:
-    """Sends via Gmail's SMTP-over-SSL endpoint using an App Password (NOT the
-    account password -- Google blocks plain-password SMTP login entirely, and
-    an App Password is scoped to this one use and revocable on its own).
-    Getting one: Google Account > Security > 2-Step Verification (must be on)
-    > App passwords > create one for "Mail". Set GMAIL_ADDRESS/GMAIL_APP_PASSWORD
-    as env vars on whatever host runs this (see README)."""
-    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
-        raise RuntimeError("GMAIL_ADDRESS/GMAIL_APP_PASSWORD not set -- can't send the access email")
+    """Sends via Resend's HTTP email API (https://api.resend.com/emails), not raw
+    SMTP. This matters specifically because most hosting platforms -- Render
+    included -- block outbound SMTP connections (ports 465/587) to stop their
+    infrastructure being used for spam; an HTTP POST over 443 goes through the
+    same firewall a raw SMTP connection can't get past (confirmed the hard way:
+    smtplib against smtp.gmail.com from a Render deploy fails with "[Errno 101]
+    Network is unreachable" -- that's the block, not a code bug).
+
+    Get a free API key at https://resend.com/api-keys -- no domain verification
+    needed to send from the shared onboarding@resend.dev sandbox address (100
+    emails/day on the free tier, plenty for a portfolio demo). Set RESEND_API_KEY
+    as an env var on whatever host runs this (see README). Optionally set
+    DEMO_REPLY_TO_EMAIL to a real inbox so replies land somewhere, since the
+    visible "From" can't be a personal address without verifying a domain you
+    own with Resend."""
+    if not RESEND_API_KEY:
+        raise RuntimeError("RESEND_API_KEY not set -- can't send the access email")
 
     body = (
         "You asked for a look at the job_agent demo.\n\n"
@@ -177,14 +194,22 @@ def send_magic_link_email(email: str, link: str) -> None:
         "discovery run -- nothing here touches anyone's real data.\n\n"
         "Didn't request this? Just ignore it -- the link expires on its own."
     )
-    msg = MIMEText(body)
-    msg["Subject"] = "Your job_agent demo link"
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = email
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": [email],
+        "subject": "Your job_agent demo link",
+        "text": body,
+    }
+    if REPLY_TO_EMAIL:
+        payload["reply_to"] = REPLY_TO_EMAIL
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, [email], msg.as_string())
+    resp = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=15,
+    )
+    resp.raise_for_status()
 
 
 def verify_token(token: str, db_path: Optional[Path] = None) -> Optional[str]:
