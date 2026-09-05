@@ -6,20 +6,30 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+  {% if demo_mode %}
+    <div class="demo-banner">
+      Public demo -- sample profile, capped discovery, no real applications submitted.
+      {% if demo_email %}Signed in as {{ demo_email }}.{% endif %}
+    </div>
+  {% endif %}
   <header>
     <nav>
       <a href="{{ url_for('index') }}" class="brand">job_agent</a>
-      <a href="{{ url_for('add_lead') }}">Add Lead</a>
-      <a href="{{ url_for('add_browsed_page') }}">Add Browsed Page</a>
+      {% if not demo_mode %}
+        <a href="{{ url_for('add_lead') }}">Add Lead</a>
+        <a href="{{ url_for('add_browsed_page') }}">Add Browsed Page</a>
+      {% endif %}
       <a href="{{ url_for('profile_view') }}">Profile</a>
-      <form method="post" action="{{ url_for('set_engine') }}" class="engine-form">
-        <label for="engine">Engine:</label>
-        <select name="engine" id="engine" onchange="this.form.submit()">
-          <option value="fake" {% if current_engine == 'fake' %}selected{% endif %}>fake (free)</option>
-          <option value="claude" {% if current_engine == 'claude' %}selected{% endif %}>claude (paid)</option>
-          <option value="gemini" {% if current_engine == 'gemini' %}selected{% endif %}>gemini (free tier)</option>
-        </select>
-      </form>
+      {% if not demo_mode %}
+        <form method="post" action="{{ url_for('set_engine') }}" class="engine-form">
+          <label for="engine">Engine:</label>
+          <select name="engine" id="engine" onchange="this.form.submit()">
+            <option value="fake" {% if current_engine == 'fake' %}selected{% endif %}>fake (free)</option>
+            <option value="claude" {% if current_engine == 'claude' %}selected{% endif %}>claude (paid)</option>
+            <option value="gemini" {% if current_engine == 'gemini' %}selected{% endif %}>gemini (free tier)</option>
+          </select>
+        </form>
+      {% endif %}
     </nav>
   </header>
 

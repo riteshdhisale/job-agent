@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Try the demo — job_agent{% endblock %}
+{% block content %}
+  <div class="demo-landing">
+    <h1>Try job_agent</h1>
+    <p class="gate-note">Enter your email and you'll get a one-time link (valid a little while,
+       works once) into a live, sandboxed session -- a sample profile, never anyone's real data.</p>
+    <div class="card">
+      <form method="post">
+        <label for="email">Email</label>
+        <input type="email" name="email" id="email" placeholder="you@example.com" required autofocus>
+        <button type="submit" class="btn-primary">Send me a link</button>
+      </form>
+    </div>
+    <ul>
+      <li>Runs against a fictional sample resume, not the author's real one.</li>
+      <li>Discovery is capped to a small number of runs per visitor, so it can't run up a real API bill.</li>
+      <li>Filling out and submitting real application forms is disabled -- everything else (discover,
+          tailor, outreach drafts, interview prep) is live.</li>
+    </ul>
+  </div>
+{% endblock %}

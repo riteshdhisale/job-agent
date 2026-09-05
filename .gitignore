@@ -5,6 +5,7 @@ __pycache__/
 .env
 data/jobs.db
 data/profile.json
-data/resume.txt
 data/scrape_cooldowns.json
 *.png
+data/demo_jobs.db
+data/demo_access.db

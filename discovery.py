@@ -74,7 +74,7 @@ def run_discovery(client: LLMClient, resume_text: str, site_urls: List[str], job
                    greenhouse_boards: List[str] = (), lever_sites: List[str] = (),
                    max_age_hours: Optional[int] = None, min_salary: Optional[int] = None,
                    title_keywords: Sequence[str] = (), exclude_title_keywords: Sequence[str] = (),
-                   allowed_locations: Sequence[str] = (),
+                   allowed_locations: Sequence[str] = (), max_pages: Optional[int] = None,
                    on_progress: Optional[Callable[[dict], None]] = None) -> DiscoveryReport:
     """`on_progress`, if given, is called after each source is attempted (one career
     site, or one of Adzuna/RemoteOK, or one Greenhouse board, or one Lever site) with
@@ -95,7 +95,13 @@ def run_discovery(client: LLMClient, resume_text: str, site_urls: List[str], job
     including Greenhouse/Lever -- which, unlike Adzuna/RemoteOK, have no query to narrow
     them down at all; fetching a company's board means every open role there, every
     department. Without a title filter this is also what was silently costing LLM calls
-    on completely unrelated roles (see the "these roles are not matching" gap)."""
+    on completely unrelated roles (see the "these roles are not matching" gap).
+
+    `max_pages` (None by default = Adzuna's own default of 5 pages/250 results per
+    query, unchanged behavior) caps how many Adzuna pages get fetched per query --
+    added specifically so a public/demo deployment can force `max_pages=1` and keep
+    a stranger's discover run cheap and bounded, without touching Adzuna's own
+    pagination logic or any other caller's behavior."""
     site_urls = site_urls[:MAX_SITES_PER_RUN]
     queries = _normalize_queries(query)
     failed: List[str] = []
@@ -139,7 +145,8 @@ def run_discovery(client: LLMClient, resume_text: str, site_urls: List[str], job
         adzuna_failed = []
         for q in queries:
             adzuna = fetch_adzuna_listings(query=q, country=country, min_salary=min_salary,
-                                            max_days_old=(max_age_hours // 24 + 1) if max_age_hours else None)
+                                            max_days_old=(max_age_hours // 24 + 1) if max_age_hours else None,
+                                            max_pages=max_pages if max_pages is not None else 5)
             if not adzuna.ok:
                 adzuna_failed.append(f"adzuna:{country}:{q} -- {adzuna.note}")
             else:

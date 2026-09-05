@@ -1,0 +1,40 @@
+Jane Doe
+Product Manager
+jane.doe@example.com | Pune, Maharashtra, India | linkedin.com/in/jane-doe-example
+
+SUMMARY
+Product Manager with 6+ years shipping B2B SaaS and platform products, spanning
+tax/compliance software, enterprise consulting, and HR tech. Comfortable owning a
+roadmap end to end: discovery, spec, engineering handoff, launch, and the metrics
+that prove it worked.
+
+EXPERIENCE
+
+Senior Product Manager, Platform — Acme Compliance Software (2022–2026)
+- Owned the integrations roadmap for a tax-compliance platform used by mid-market
+  finance teams; shipped 12 new API-based connectors, growing integration-attached
+  revenue 30% year over year.
+- Led the move from a quarterly release train to continuous delivery, cutting median
+  time-to-ship for a small feature from 6 weeks to 9 days.
+- Partnered with legal and security to launch in two new regulated markets, defining
+  the compliance requirements before a single line of code was written.
+
+Product Owner / Business Analyst — Meridian Consulting (2019–2022)
+- Acted as product owner for three concurrent client engagements, translating messy
+  stakeholder requirements into prioritized, engineering-ready backlogs.
+- Built the business case and requirements for a workflow-automation tool that
+  became the firm's most-resold internal accelerator.
+
+Implementation Associate — Northgate HR Technologies (2018–2019)
+- Ran technical onboarding for 40+ enterprise HR-software customers, and fed the
+  most common implementation blockers back into the product roadmap.
+
+SKILLS
+Product strategy, roadmapping, API/platform products, B2B SaaS, stakeholder
+management, SQL, Figma, Jira, experimentation design.
+
+EDUCATION
+B.E., Computer Engineering — (sample institution)
+
+WORK AUTHORIZATION
+Authorized to work in India; open to relocation.

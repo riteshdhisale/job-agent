@@ -31,9 +31,11 @@ form-post-and-redirect is the simplest honest fit for them.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import traceback
 from dataclasses import asdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -52,12 +54,39 @@ from tools.manual_lead_tool import parse_pasted_lead
 from tools.extract_tool import extract_job_listings
 from tools.score_tool import score_job_matches
 from tools.instahyre_scraper import fetch_instahyre_listings
+import demo_gate
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
+# --- public demo mode -------------------------------------------------------
+# Off (False) is the only mode this app has ever run in locally. Set DEMO_MODE=1
+# only on a public deployment (see README's "Deploying the public demo"): it
+# swaps in a sample resume/profile/job-store so nothing here ever touches a
+# real person's data, forces one LLM engine and a small Adzuna page cap so a
+# stranger can't run up a real API bill, disables the Playwright apply-form
+# automation entirely (no reason to let the public internet drive a headless
+# browser at arbitrary third-party sites), and puts every route behind the
+# email-magic-link gate in demo_gate.py.
+DEMO_MODE = os.environ.get("DEMO_MODE") == "1"
+DEMO_ENGINE = os.environ.get("DEMO_ENGINE", "gemini")
+DEMO_ADZUNA_MAX_PAGES = int(os.environ.get("DEMO_ADZUNA_MAX_PAGES", "1"))
+
 app = Flask(__name__)
-# Local single-user tool -- a fixed dev key is fine since this never leaves your machine.
-app.secret_key = "job-agent-local-dev-key"
+if DEMO_MODE:
+    # A fixed secret key is fine for a tool that never leaves your machine (the
+    # original design here) -- it is NOT fine once this process is reachable by
+    # the public internet, since anyone could forge a session cookie with it.
+    # FLASK_SECRET_KEY is required in demo mode specifically so this can't be
+    # deployed public-facing on the old hardcoded key by accident.
+    _secret = os.environ.get("FLASK_SECRET_KEY")
+    if not _secret:
+        raise RuntimeError("DEMO_MODE=1 requires FLASK_SECRET_KEY to be set -- "
+                            "generate one with e.g. python -c \"import secrets; print(secrets.token_hex(32))\"")
+    app.secret_key = _secret
+    app.permanent_session_lifetime = timedelta(hours=6)
+else:
+    # Local single-user tool -- a fixed dev key is fine since this never leaves your machine.
+    app.secret_key = "job-agent-local-dev-key"
 
 
 def _format_lakhs(value: Optional[int]) -> Optional[str]:
@@ -125,7 +154,48 @@ def get_client(engine: str):
 
 
 def current_engine() -> str:
+    # Demo visitors don't get to pick the engine -- one fixed choice (DEMO_ENGINE),
+    # so quota usage is predictable and the /settings/engine route is a no-op below.
+    if DEMO_MODE:
+        return DEMO_ENGINE
     return session.get("engine", "fake")
+
+
+# --- data isolation for demo mode -------------------------------------------
+# Every one of these reads DEMO_MODE at call time (not import time) so tests can
+# monkeypatch app.DEMO_MODE per-test without reloading the module. In demo mode
+# every visitor shares ONE sandboxed dataset (data/demo_jobs.db, data/demo_profile.json,
+# data/demo_resume.txt) -- deliberately not per-visitor, both because a public demo
+# is more interesting as a shared, growing job list than an empty box per click, and
+# because per-visitor isolated SQLite files would be real added complexity for a
+# feature whose whole point is a hard cap on how much any one visitor can do anyway.
+
+def _resume_path() -> Path:
+    return DATA_DIR / ("demo_resume.txt" if DEMO_MODE else "resume.txt")
+
+
+def _job_store() -> JobStore:
+    return JobStore(db_path=DATA_DIR / "demo_jobs.db") if DEMO_MODE else JobStore()
+
+
+def _profile_store() -> ProfileStore:
+    return ProfileStore(path=DATA_DIR / "demo_profile.json") if DEMO_MODE else ProfileStore()
+
+
+def _demo_extra_action_guard():
+    """Call at the top of tailor/outreach/prep. Returns a Flask response to return
+    immediately if the visitor is out of session or out of their extra-action
+    allowance; returns None (proceed normally) otherwise, including whenever
+    DEMO_MODE is off."""
+    if not DEMO_MODE:
+        return None
+    email = session.get("demo_email")
+    if not email:
+        return jsonify({"ok": False, "error": "Demo session expired -- request a new link."}), 403
+    if demo_gate.extra_actions_remaining(email) <= 0:
+        return jsonify({"ok": False, "error": "You've used up this demo session's action allowance. Thanks for trying it out!"})
+    demo_gate.record_extra_action(email)
+    return None
 
 
 # --- background discovery run + progress bar -------------------------------
@@ -147,12 +217,12 @@ def _discover_worker(engine: str, query: str, country: str, include_instahyre: b
     global _discover_state
     try:
         client = get_client(engine)
-        resume_text = Path(DATA_DIR / "resume.txt").read_text()
+        resume_text = _resume_path().read_text()
         site_urls = json.loads(Path(DATA_DIR / "career_sites.json").read_text())
         gh_path, lv_path = DATA_DIR / "greenhouse_boards.json", DATA_DIR / "lever_sites.json"
         greenhouse_boards = json.loads(gh_path.read_text()) if gh_path.exists() else []
         lever_sites = json.loads(lv_path.read_text()) if lv_path.exists() else []
-        store = JobStore()
+        store = _job_store()
 
         def on_progress(evt):
             with _discover_lock:
@@ -164,10 +234,13 @@ def _discover_worker(engine: str, query: str, country: str, include_instahyre: b
                                 max_age_hours=max_age_hours, min_salary=min_salary,
                                 title_keywords=title_keywords or (), exclude_title_keywords=exclude_title_keywords or (),
                                 allowed_locations=allowed_locations or (),
+                                max_pages=DEMO_ADZUNA_MAX_PAGES if DEMO_MODE else None,
                                 on_progress=on_progress)
 
         jobs_found = report.jobs_found
-        if include_instahyre:
+        # Instahyre is scraping, opt-in for local use -- never exposed to public
+        # demo visitors regardless of what a crafted request body asks for.
+        if include_instahyre and not DEMO_MODE:
             with _discover_lock:
                 _discover_state.update(label="Instahyre (rate-limited)")
             # Instahyre takes one search term -- use just the first of possibly several
@@ -194,11 +267,59 @@ def _discover_worker(engine: str, query: str, country: str, include_instahyre: b
 
 @app.context_processor
 def inject_globals():
-    return {"current_engine": current_engine(), "STATUSES": STATUSES}
+    return {"current_engine": current_engine(), "STATUSES": STATUSES, "demo_mode": DEMO_MODE,
+            "demo_email": session.get("demo_email") if DEMO_MODE else None}
+
+
+# --- public demo gate --------------------------------------------------------
+# Everything below is only reachable/relevant when DEMO_MODE=1. The gate itself is
+# a single before_request hook: every route except the landing page, the verify
+# link, and Flask's own static-file handler requires session["demo_email"] to be
+# set (put there by demo_verify below), which only happens after a real magic
+# link -- sent to a real inbox -- was clicked.
+_DEMO_OPEN_ENDPOINTS = {"demo_landing", "demo_verify", "static"}
+
+
+@app.before_request
+def _demo_gate():
+    if not DEMO_MODE:
+        return None
+    if request.endpoint in _DEMO_OPEN_ENDPOINTS:
+        return None
+    if not session.get("demo_email"):
+        return redirect(url_for("demo_landing"))
+    return None
+
+
+@app.route("/demo", methods=["GET", "POST"], endpoint="demo_landing")
+def demo_landing():
+    if not DEMO_MODE:
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        email = request.form.get("email", "")
+        result = demo_gate.request_access(email, request.remote_addr, request.url_root)
+        flash(result.message, "success" if result.ok else "error")
+        return redirect(url_for("demo_landing"))
+    return render_template("demo_landing.html")
+
+
+@app.route("/demo/verify/<token>", endpoint="demo_verify")
+def demo_verify(token):
+    email = demo_gate.verify_token(token)
+    if not email:
+        flash("That link is invalid, already used, or has expired -- request a new one below.", "error")
+        return redirect(url_for("demo_landing"))
+    session.permanent = True
+    session["demo_email"] = email
+    flash(f"You're in, {email} -- sample profile, one discover run, capped actions. Have a look around.", "success")
+    return redirect(url_for("index"))
 
 
 @app.route("/settings/engine", methods=["POST"])
 def set_engine():
+    if DEMO_MODE:
+        flash("The engine is fixed in this public demo.", "info")
+        return redirect(request.referrer or url_for("index"))
     session["engine"] = request.form.get("engine", "fake")
     return redirect(request.referrer or url_for("index"))
 
@@ -217,7 +338,7 @@ def index():
 
 @app.route("/api/jobs")
 def api_jobs():
-    store = JobStore()
+    store = _job_store()
     status = request.args.get("status") or None
     jobs = store.list(status=status)
     all_jobs = store.list() if status else jobs
@@ -235,7 +356,7 @@ def api_jobs():
 
 @app.route("/api/jobs/<int:job_id>")
 def api_job_detail(job_id):
-    job = JobStore().get(job_id)
+    job = _job_store().get(job_id)
     if not job:
         return jsonify({"ok": False, "error": f"No job #{job_id}"}), 404
     return jsonify({"ok": True, "job": _job_to_dict(job)})
@@ -245,7 +366,7 @@ def api_job_detail(job_id):
 def api_job_status(job_id):
     new_status = (request.json or {}).get("status", "")
     try:
-        JobStore().set_status(job_id, new_status)
+        _job_store().set_status(job_id, new_status)
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     return jsonify({"ok": True, "status": new_status})
@@ -253,9 +374,12 @@ def api_job_status(job_id):
 
 @app.route("/api/jobs/<int:job_id>/tailor", methods=["POST"])
 def api_tailor(job_id):
-    store = JobStore()
+    guard = _demo_extra_action_guard()
+    if guard:
+        return guard
+    store = _job_store()
     job = store.get(job_id)
-    resume_text = Path(DATA_DIR / "resume.txt").read_text()
+    resume_text = _resume_path().read_text()
     force = bool((request.json or {}).get("force"))
     try:
         result = tailor_resume(get_client(current_engine()), resume_text, job.title, job.snippet,
@@ -274,7 +398,15 @@ def api_tailor(job_id):
 
 @app.route("/api/jobs/<int:job_id>/contacts", methods=["POST"])
 def api_contacts(job_id):
-    store = JobStore()
+    if DEMO_MODE:
+        # Apollo's free tier is 75 lookups/month total -- shared across every
+        # visitor, not per-visitor -- so this stays off in the public demo entirely
+        # rather than trying to sub-divide an already-small shared quota.
+        return jsonify({"ok": True, "contacts": [],
+                         "info": "Contact-finding is disabled in this public demo (it shares a small "
+                                 "monthly quota with the real tool) -- outreach drafting below still works "
+                                 "if you type in a name/title manually."})
+    store = _job_store()
     job = store.get(job_id)
     if job.outreach_contacts:
         return jsonify({"ok": True, "contacts": job.outreach_contacts, "info": "Already have contact(s) for this job."})
@@ -297,9 +429,12 @@ def api_contacts(job_id):
 
 @app.route("/api/jobs/<int:job_id>/outreach", methods=["POST"])
 def api_outreach(job_id):
-    store = JobStore()
+    guard = _demo_extra_action_guard()
+    if guard:
+        return guard
+    store = _job_store()
     job = store.get(job_id)
-    resume_text = Path(DATA_DIR / "resume.txt").read_text()
+    resume_text = _resume_path().read_text()
     body = request.json or {}
 
     name = body.get("name", "").strip()
@@ -324,8 +459,8 @@ def api_outreach(job_id):
 
 @app.route("/api/jobs/<int:job_id>/apply", methods=["POST"])
 def api_apply(job_id):
-    store = JobStore()
-    profile_store = ProfileStore()
+    store = _job_store()
+    profile_store = _profile_store()
     profile = profile_store.load()
     job = store.get(job_id)
     client = get_client(current_engine())
@@ -342,6 +477,15 @@ def api_apply(job_id):
         return jsonify({"ok": True, "kind": "manual_required",
                          "info": f"Application method is '{job.application_method}' -- target: "
                                  f"{job.application_target or '(not specified)'}. No safe automation for this; handle it yourself."})
+
+    if DEMO_MODE:
+        # Never let public traffic drive a real headless browser at an arbitrary
+        # third-party site -- that's the one action this demo doesn't simulate,
+        # it just declines clearly.
+        return jsonify({"ok": True, "kind": "demo_disabled",
+                         "info": "Filling and submitting real application forms is disabled in this public "
+                                 "demo (it would mean a stranger's browser session hitting a live third-party "
+                                 "site). Everything else -- discover, tailor, contacts, outreach, prep -- is live."})
 
     url = job.application_target or job.url
     screenshot_path = str(DATA_DIR / f"apply_screenshot_job{job_id}.png")
@@ -369,7 +513,7 @@ def api_apply_resolve(job_id):
         return jsonify({"ok": False, "error": "No pending application review for that job."}), 400
 
     answers = (request.json or {}).get("answers", [])
-    profile_store = ProfileStore()
+    profile_store = _profile_store()
     profile = profile_store.load()
     for label, answer in zip(pending["labels"], answers):
         answer = (answer or "").strip()
@@ -377,7 +521,7 @@ def api_apply_resolve(job_id):
             profile.remember(label, answer)
     profile_store.save(profile)
 
-    store = JobStore()
+    store = _job_store()
     notes = (f"Filled: {pending['filled']}\nAnswered and saved: {pending['labels']}\n"
              f"Screenshot: {pending['screenshot']}")
     store.update(job_id, application_notes=notes)
@@ -387,20 +531,23 @@ def api_apply_resolve(job_id):
 
 @app.route("/api/jobs/<int:job_id>/mark-applied", methods=["POST"])
 def api_mark_applied(job_id):
-    JobStore().set_status(job_id, "applied")
+    _job_store().set_status(job_id, "applied")
     return jsonify({"ok": True, "status": "applied"})
 
 
 @app.route("/api/jobs/<int:job_id>/delete", methods=["POST"])
 def api_delete_job(job_id):
-    if JobStore().delete(job_id):
+    if _job_store().delete(job_id):
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": f"No job #{job_id} found."}), 404
 
 
 @app.route("/api/jobs/<int:job_id>/prep", methods=["POST"])
 def api_prep(job_id):
-    store = JobStore()
+    guard = _demo_extra_action_guard()
+    if guard:
+        return guard
+    store = _job_store()
     job = store.get(job_id)
     prep_result = prepare_for_interview(get_client(current_engine()), job.tailored_resume or job.rationale,
                                          job.title, job.snippet, job.rationale, job.missing_skills)
@@ -423,6 +570,16 @@ def discover():
     """Kicks off a background discovery run and returns immediately -- the dashboard's
     JS then polls /discover/status itself to render an inline progress panel, so this
     never has to redirect anywhere."""
+    if DEMO_MODE:
+        email = session.get("demo_email")
+        if not email:
+            return jsonify({"ok": False, "info": "Demo session expired -- request a new link."}), 403
+        remaining = demo_gate.discover_runs_remaining(email)
+        if remaining <= 0:
+            return jsonify({"ok": False, "info": "You've used your discover run(s) for this demo session. "
+                                                   "Thanks for trying it out!"})
+        demo_gate.record_discover_run(email)
+
     with _discover_lock:
         if _discover_state["running"]:
             return jsonify({"ok": False, "info": "A discovery run is already in progress."})
@@ -477,6 +634,12 @@ def discover_status():
 def add_lead():
     if request.method == "GET":
         return render_template("add_lead.html")
+    if DEMO_MODE:
+        # Free-text input straight into an LLM call, from anyone on the internet,
+        # is a bigger attack surface than a fixed discover query -- out of scope
+        # for a portfolio demo, so this whole flow stays off when DEMO_MODE=1.
+        flash("Pasting in your own leads is disabled in this public demo -- try the Discover panel instead.", "info")
+        return redirect(url_for("index"))
 
     text = request.form.get("text", "").strip()
     source = request.form.get("source", "manual")
@@ -490,9 +653,9 @@ def add_lead():
         flash("No job posting detected in that text.", "info")
         return redirect(url_for("add_lead"))
 
-    resume_text = Path(DATA_DIR / "resume.txt").read_text()
+    resume_text = _resume_path().read_text()
     match = score_job_matches(client, resume_text, [lead.listing])[0]
-    store = JobStore()
+    store = _job_store()
     job_id = store.add_match(match, source_type="manual_lead", application_method=lead.application_method,
                               application_target=lead.application_target,
                               poster_name=lead.poster_name, poster_title=lead.poster_title)
@@ -504,6 +667,9 @@ def add_lead():
 def add_browsed_page():
     if request.method == "GET":
         return render_template("add_browsed_page.html")
+    if DEMO_MODE:
+        flash("Adding a browsed page is disabled in this public demo -- try the Discover panel instead.", "info")
+        return redirect(url_for("index"))
 
     text = request.form.get("text", "").strip()
     source_url = request.form.get("source_url", "live-browse").strip()
@@ -512,13 +678,13 @@ def add_browsed_page():
         return redirect(url_for("add_browsed_page"))
 
     client = get_client(current_engine())
-    resume_text = Path(DATA_DIR / "resume.txt").read_text()
+    resume_text = _resume_path().read_text()
     listings = extract_job_listings(client, text, source_url or "live-browse")
     if not listings:
         flash("No job listings extracted from that text.", "info")
         return redirect(url_for("add_browsed_page"))
 
-    store = JobStore()
+    store = _job_store()
     count = 0
     for match in score_job_matches(client, resume_text, listings):
         store.add_match(match, source_type="live_browse")
@@ -529,10 +695,15 @@ def add_browsed_page():
 
 @app.route("/profile", methods=["GET", "POST"])
 def profile_view():
-    store = ProfileStore()
+    store = _profile_store()
     profile = store.load()
 
     if request.method == "POST":
+        if DEMO_MODE:
+            # This is one shared sample profile every visitor sees -- letting any
+            # one of them overwrite it for everyone else isn't a real feature.
+            flash("Editing the profile is disabled in this public demo (it's a shared sample profile).", "info")
+            return redirect(url_for("profile_view"))
         for field in ("full_name", "email", "phone", "location", "linkedin_url",
                       "portfolio_url", "work_authorized", "resume_path"):
             setattr(profile, field, request.form.get(field, getattr(profile, field)))
@@ -547,4 +718,11 @@ if __name__ == "__main__":
     # threaded=True matters here: discovery runs on its own background thread while the
     # dashboard polls /discover/status on the main request thread -- without this the
     # dev server serves one request at a time and the poll would just queue behind it.
-    app.run(debug=True, host="127.0.0.1", port=5000, threaded=True)
+    #
+    # The public demo deploy (see README) never actually reaches this block -- Render
+    # runs gunicorn directly per the Procfile -- but this stays production-safe
+    # regardless: debug is only ever True outside DEMO_MODE, and DEMO_MODE binds to
+    # 0.0.0.0/$PORT rather than localhost:5000 in case anything ever does invoke this
+    # module directly on a public host.
+    app.run(debug=not DEMO_MODE, host="0.0.0.0" if DEMO_MODE else "127.0.0.1",
+            port=int(os.environ.get("PORT", 5000)), threaded=True)

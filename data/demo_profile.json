@@ -1,0 +1,11 @@
+{
+  "full_name": "Jane Doe",
+  "email": "jane.doe@example.com",
+  "phone": "555-0142",
+  "location": "Pune, Maharashtra, India",
+  "linkedin_url": "https://www.linkedin.com/in/jane-doe-example",
+  "portfolio_url": "",
+  "work_authorized": "Authorized to work in India; open to relocation.",
+  "resume_path": "data/demo_resume.txt",
+  "answers": {}
+}

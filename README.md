@@ -12,7 +12,8 @@ write-up of the product decisions and a couple of debugging war stories here:
 
 This repo is a sanitized copy of my working setup — my real resume, application
 history, and API keys are excluded (see "What's not in this repo" below). Clone it,
-drop in your own data, and it works the same way for you.
+drop in your own data, and it works the same way for you. It can also run as a public,
+email-gated demo against a sample profile — see "Deploying the public demo" below.
 
 ## Setup (one-time)
 
@@ -453,15 +454,87 @@ client with `JobStore` pointed at a temp database).
 
 This is a sanitized copy of my personal working install. Left out on purpose:
 
-- `data/jobs.db`, `data/profile.json`, `data/resume.txt` — my real application history,
-  contact details, and resume.
+- `data/jobs.db`, `data/profile.json` — my real application history and contact details.
 - `.env` — my real API keys (`.env.example` is included as a template).
 - `data/career_sites.json`, `data/greenhouse_boards.json`, `data/lever_sites.json` —
   ship empty here; populate with your own target companies (see "Maximizing coverage").
 
-`tests/test_apply_tool.py` uses a fictional sample profile ("Jane Doe") instead of a
-real person's details, since it needs *some* profile object to exercise the form-filler
-against.
+`data/resume.txt` and `tests/test_apply_tool.py` both use a fictional sample profile
+("Jane Doe") instead of a real person's details — replace `data/resume.txt` with your
+own before relying on this for a real search; the test fixture just needs *some*
+profile object to exercise the form-filler against.
+
+## Deploying the public demo
+
+The repo also supports running as a **public, gated demo** — a live, hosted instance
+anyone can request time-boxed access to, without ever touching a real person's resume,
+job history, or API quota. This is opt-in and off by default (`DEMO_MODE` unset or `0`
+behaves exactly like the local single-user tool described above); flip it on only on a
+deployment you intend to be public.
+
+**What demo mode actually changes, all in `app.py`/`demo_gate.py`:**
+
+- Every route sits behind an email-gated magic link (`demo_gate.py`): a visitor enters
+  their email at `/demo`, gets a one-time link (single-use, expires after
+  `DEMO_LINK_EXPIRY_MINUTES`, default 30), and clicking it starts a session. Rate-limited
+  both per-email-per-day and per-IP-per-hour before a token is even issued.
+- All demo visitors share **one** sandboxed dataset — `data/demo_resume.txt`,
+  `data/demo_profile.json`, `data/demo_jobs.db` — never the real `data/resume.txt` /
+  `data/profile.json` / `data/jobs.db` files. Two fictional sample files
+  (`data/demo_resume.txt`, `data/demo_profile.json`) ship in the repo for this.
+- Discovery is capped at `DEMO_MAX_RUNS_PER_EMAIL` (default 1) real run per visitor, and
+  each run is capped to `DEMO_ADZUNA_MAX_PAGES` (default 1) Adzuna page instead of the
+  normal 5 — real listings, real scoring, just bounded so a stranger can't run up a real
+  Adzuna/Gemini bill. Instahyre scraping is always off in demo mode regardless of what a
+  request asks for.
+- Tailor/outreach/prep (the other real LLM calls) share a combined
+  `DEMO_MAX_EXTRA_ACTIONS_PER_EMAIL` allowance (default 10) per visitor.
+- Contact-finding (`/api/jobs/<id>/contacts`) is disabled outright — Apollo's free tier
+  is a small *shared* monthly quota (75 lookups), not something to sub-divide across
+  anonymous visitors.
+- Filling and submitting real application forms (`apply`) is disabled outright — no
+  reason to let public traffic drive a real headless browser at a live third-party site.
+- Add Lead / Add Browsed Page / editing the profile are all disabled — they'd mean
+  arbitrary text from the public internet going straight into an LLM call on your
+  account, or one visitor overwriting the shared sample profile for everyone else.
+- The engine is fixed to `DEMO_ENGINE` (default `gemini`) — visitors don't get to choose.
+- The Flask secret key is **required** to come from `FLASK_SECRET_KEY` (the app refuses
+  to start in demo mode without it) rather than the hardcoded local-dev key, since a
+  fixed public secret would let anyone forge a session cookie.
+
+**What this is not:** a production-grade abuse-prevention system. The rate limits are
+plain SQLite counters, sized for "a handful of people click a portfolio link," not for
+withstanding a determined attacker with many real inboxes and a rotating IP. That's a
+disclosed, deliberate trade-off for a personal-project demo, not an oversight.
+
+**Deploying it (Render, or anything similar that reads a `Procfile`):**
+
+1. Push this repo to your own GitHub account (see the main project README/case study
+   for why this one's a fork-friendly, sanitized copy).
+2. Create a Gmail **App Password** (not your account password — Google blocks that for
+   SMTP entirely): Google Account → Security → turn on 2-Step Verification → App
+   passwords → create one for "Mail". This is what sends the magic-link emails.
+3. Create a Render (or equivalent) web service pointed at your repo. It picks up the
+   `Procfile` (`gunicorn app:app --workers 1 --worker-class gthread --threads 8`) —
+   deliberately **one worker**, since discovery progress lives in an in-process dict
+   shared across requests within a single process; multiple worker processes would each
+   have their own copy and the progress bar would poll the wrong one at random.
+4. Set these environment variables on the host:
+   - `DEMO_MODE=1`
+   - `FLASK_SECRET_KEY` — generate one with
+     `python -c "import secrets; print(secrets.token_hex(32))"`
+   - `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` — from step 2
+   - `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY`, matching whatever `DEMO_ENGINE` you use)
+     — consider a **separate** key from your personal daily-driver key, so demo traffic
+     and your own usage aren't drawing on the same quota
+   - `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` — optional; without these, Adzuna is silently
+     skipped in the demo the same way it is locally
+   - Optionally override any of `DEMO_ENGINE`, `DEMO_MAX_RUNS_PER_EMAIL`,
+     `DEMO_ADZUNA_MAX_PAGES`, `DEMO_MAX_EXTRA_ACTIONS_PER_EMAIL`,
+     `DEMO_LINK_EXPIRY_MINUTES`, `DEMO_MAX_REQUESTS_PER_EMAIL_PER_DAY`,
+     `DEMO_MAX_REQUESTS_PER_IP_PER_HOUR` — all documented at the top of `demo_gate.py`.
+5. Deploy. Visit the assigned URL's `/demo` and request access to yourself first, before
+   sharing the link anywhere, to confirm the email actually arrives.
 
 ## License
 
