@@ -13,9 +13,12 @@ data/demo_jobs.db, so wiping one never touches the others):
      an email-only limit doesn't stop someone cycling through throwaway
      addresses to spam the mailbox or the Adzuna/Gemini quota), creates a
      single-use token good for DEMO_LINK_EXPIRY_MINUTES, and emails a magic
-     link via Resend's HTTP email API (see README's "Deploying the public
+     link via SendGrid's HTTP email API (see README's "Deploying the public
      demo" section for why HTTP-based sending, not raw SMTP -- most hosts,
-     Render included, block outbound SMTP entirely).
+     Render included, block outbound SMTP entirely -- and why SendGrid
+     specifically, over an alternative like Resend: SendGrid's Single Sender
+     Verification lets a plain email address, not a domain, send to ANY
+     recipient once verified, which a public demo needs).
   2. verify_token(token) -- marks the token used (so the same link can't be
      replayed) and returns the email it belongs to, or None if it's missing,
      expired, or already used.
@@ -55,14 +58,18 @@ MAX_REQUESTS_PER_IP_PER_HOUR = int(os.environ.get("DEMO_MAX_REQUESTS_PER_IP_PER_
 # had to reach this address" spirit as MAX_RUNS_PER_EMAIL, not a daily reset.
 MAX_EXTRA_ACTIONS_PER_EMAIL = int(os.environ.get("DEMO_MAX_EXTRA_ACTIONS_PER_EMAIL", "10"))
 
-# Sending goes through Resend's HTTP API, not raw SMTP -- see send_magic_link_email's
-# docstring below for why. RESEND_FROM_EMAIL defaults to Resend's shared sandbox
-# address, which works with zero setup (no domain verification) but means the email
-# arrives "from" Resend, not from a personal address; DEMO_REPLY_TO_EMAIL (falling back
+# Sending goes through SendGrid's HTTP API, not raw SMTP -- see send_magic_link_email's
+# docstring below for why (Render blocks outbound SMTP) and why SendGrid specifically
+# (its Single Sender Verification lets one verified email address -- no domain needed --
+# send to any recipient, unlike sandbox-mode-only providers). SENDGRID_FROM_EMAIL MUST
+# be an address you've verified as a Single Sender in SendGrid -- sending "as" an
+# unverified address is rejected outright. DEMO_REPLY_TO_EMAIL is optional (falls back
 # to GMAIL_ADDRESS if that's the only one set, for anyone who configured this before the
-# SMTP-to-API switch) lets a real inbox still show up as the reply-to.
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "job_agent Demo <onboarding@resend.dev>")
+# SMTP-to-API switch) -- usually unnecessary here since SENDGRID_FROM_EMAIL is already a
+# real inbox, but lets replies go somewhere else if you ever want that split.
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+SENDGRID_FROM_EMAIL = os.environ.get("SENDGRID_FROM_EMAIL", "")
+SENDGRID_FROM_NAME = os.environ.get("SENDGRID_FROM_NAME", "job_agent Demo")
 REPLY_TO_EMAIL = os.environ.get("DEMO_REPLY_TO_EMAIL", os.environ.get("GMAIL_ADDRESS", ""))
 
 
@@ -168,23 +175,30 @@ def request_access(email: str, ip: Optional[str], base_url: str,
 
 
 def send_magic_link_email(email: str, link: str) -> None:
-    """Sends via Resend's HTTP email API (https://api.resend.com/emails), not raw
-    SMTP. This matters specifically because most hosting platforms -- Render
-    included -- block outbound SMTP connections (ports 465/587) to stop their
-    infrastructure being used for spam; an HTTP POST over 443 goes through the
-    same firewall a raw SMTP connection can't get past (confirmed the hard way:
-    smtplib against smtp.gmail.com from a Render deploy fails with "[Errno 101]
-    Network is unreachable" -- that's the block, not a code bug).
+    """Sends via SendGrid's HTTP email API (https://api.sendgrid.com/v3/mail/send),
+    not raw SMTP. This matters specifically because most hosting platforms --
+    Render included -- block outbound SMTP connections (ports 465/587) to stop
+    their infrastructure being used for spam; an HTTP POST over 443 goes through
+    the same firewall a raw SMTP connection can't get past (confirmed the hard
+    way: smtplib against smtp.gmail.com from a Render deploy fails with
+    "[Errno 101] Network is unreachable" -- that's the block, not a code bug).
 
-    Get a free API key at https://resend.com/api-keys -- no domain verification
-    needed to send from the shared onboarding@resend.dev sandbox address (100
-    emails/day on the free tier, plenty for a portfolio demo). Set RESEND_API_KEY
-    as an env var on whatever host runs this (see README). Optionally set
-    DEMO_REPLY_TO_EMAIL to a real inbox so replies land somewhere, since the
-    visible "From" can't be a personal address without verifying a domain you
-    own with Resend."""
-    if not RESEND_API_KEY:
-        raise RuntimeError("RESEND_API_KEY not set -- can't send the access email")
+    SendGrid specifically, over an HTTP-API alternative like Resend: Resend's
+    free/no-domain setup only lets you email the account's OWN signup address
+    (a 403 "testing mode" restriction) -- fine for a private tool, useless for a
+    public demo strangers need to receive email from. SendGrid's **Single Sender
+    Verification** verifies one plain email address (no domain ownership needed)
+    and then lets it send to ANY recipient.
+
+    Setup: create a free SendGrid account, Settings > Sender Authentication >
+    Verify a Single Sender -- verify the address you want demo emails to come
+    from (a personal Gmail address is fine), confirm via the email it sends you,
+    then create an API key (Settings > API Keys, "Full Access" or at minimum
+    "Mail Send"). Set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL (must exactly
+    match the verified Single Sender address) as env vars on whatever host runs
+    this (see README)."""
+    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL:
+        raise RuntimeError("SENDGRID_API_KEY/SENDGRID_FROM_EMAIL not set -- can't send the access email")
 
     body = (
         "You asked for a look at the job_agent demo.\n\n"
@@ -195,17 +209,17 @@ def send_magic_link_email(email: str, link: str) -> None:
         "Didn't request this? Just ignore it -- the link expires on its own."
     )
     payload = {
-        "from": RESEND_FROM_EMAIL,
-        "to": [email],
+        "personalizations": [{"to": [{"email": email}]}],
+        "from": {"email": SENDGRID_FROM_EMAIL, "name": SENDGRID_FROM_NAME},
         "subject": "Your job_agent demo link",
-        "text": body,
+        "content": [{"type": "text/plain", "value": body}],
     }
     if REPLY_TO_EMAIL:
-        payload["reply_to"] = REPLY_TO_EMAIL
+        payload["reply_to"] = {"email": REPLY_TO_EMAIL}
 
     resp = requests.post(
-        "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
         json=payload,
         timeout=15,
     )

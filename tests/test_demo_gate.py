@@ -133,14 +133,25 @@ def test_extra_action_cap(db_path, monkeypatch):
 
 
 def test_send_magic_link_email_requires_credentials(monkeypatch):
-    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "")
+    monkeypatch.setattr(demo_gate, "SENDGRID_API_KEY", "")
+    monkeypatch.setattr(demo_gate, "SENDGRID_FROM_EMAIL", "")
     with pytest.raises(RuntimeError):
         demo_gate.send_magic_link_email("someone@example.com", "http://x/demo/verify/tok")
 
 
-def test_send_magic_link_email_calls_the_resend_api(monkeypatch):
-    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "test-key")
-    monkeypatch.setattr(demo_gate, "RESEND_FROM_EMAIL", "job_agent Demo <onboarding@resend.dev>")
+def test_send_magic_link_email_requires_a_from_address_even_with_a_key(monkeypatch):
+    # A key alone isn't enough -- SendGrid rejects sending "as" an address that
+    # hasn't gone through Single Sender Verification, so both must be set.
+    monkeypatch.setattr(demo_gate, "SENDGRID_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "SENDGRID_FROM_EMAIL", "")
+    with pytest.raises(RuntimeError):
+        demo_gate.send_magic_link_email("someone@example.com", "http://x/demo/verify/tok")
+
+
+def test_send_magic_link_email_calls_the_sendgrid_api(monkeypatch):
+    monkeypatch.setattr(demo_gate, "SENDGRID_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "SENDGRID_FROM_EMAIL", "ritesh@example.com")
+    monkeypatch.setattr(demo_gate, "SENDGRID_FROM_NAME", "job_agent Demo")
     monkeypatch.setattr(demo_gate, "REPLY_TO_EMAIL", "ritesh@example.com")
     calls = []
 
@@ -158,16 +169,17 @@ def test_send_magic_link_email_calls_the_resend_api(monkeypatch):
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["url"] == "https://api.resend.com/emails"
+    assert call["url"] == "https://api.sendgrid.com/v3/mail/send"
     assert call["headers"]["Authorization"] == "Bearer test-key"
-    assert call["json"]["to"] == ["someone@example.com"]
-    assert call["json"]["from"] == "job_agent Demo <onboarding@resend.dev>"
-    assert call["json"]["reply_to"] == "ritesh@example.com"
-    assert "http://x/demo/verify/tok" in call["json"]["text"]
+    assert call["json"]["personalizations"] == [{"to": [{"email": "someone@example.com"}]}]
+    assert call["json"]["from"] == {"email": "ritesh@example.com", "name": "job_agent Demo"}
+    assert call["json"]["reply_to"] == {"email": "ritesh@example.com"}
+    assert "http://x/demo/verify/tok" in call["json"]["content"][0]["value"]
 
 
 def test_send_magic_link_email_omits_reply_to_when_unset(monkeypatch):
-    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "SENDGRID_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "SENDGRID_FROM_EMAIL", "ritesh@example.com")
     monkeypatch.setattr(demo_gate, "REPLY_TO_EMAIL", "")
     calls = []
 
@@ -184,15 +196,16 @@ def test_send_magic_link_email_omits_reply_to_when_unset(monkeypatch):
     assert "reply_to" not in calls[0]
 
 
-def test_a_failed_resend_call_propagates_as_an_exception(monkeypatch):
+def test_a_failed_sendgrid_call_propagates_as_an_exception(monkeypatch):
     # request_access is what's responsible for turning this into a clean user-facing
     # message (see test_a_send_failure_is_reported_cleanly_not_raised above) -- this
     # test just confirms send_magic_link_email itself doesn't swallow a bad response.
-    monkeypatch.setattr(demo_gate, "RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "SENDGRID_API_KEY", "test-key")
+    monkeypatch.setattr(demo_gate, "SENDGRID_FROM_EMAIL", "ritesh@example.com")
 
     class FailingResponse:
         def raise_for_status(self):
-            raise requests.HTTPError("422 Client Error: Unprocessable Entity")
+            raise requests.HTTPError("403 Client Error: Forbidden")
 
     monkeypatch.setattr(demo_gate.requests, "post", lambda *a, **kw: FailingResponse())
     with pytest.raises(requests.HTTPError):
